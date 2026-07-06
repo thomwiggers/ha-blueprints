@@ -1,0 +1,54 @@
+blueprint:
+  name: Wall switch toggle (light/scene)
+  description: >
+    Detects a physical wall switch toggle (a binary_sensor flipping state in
+    either direction) and turns a light on or off depending on the light's
+    current state. The "on" side can run any action (e.g. activate a Hue
+    scene, or just light.turn_on); the "off" side always calls
+    light.turn_off on the target light.
+  domain: automation
+  source_url: https://github.com/thomwiggers/ha-blueprints/blob/main/blueprints/automation/thomwiggers/wall_switch_toggle.yaml
+  input:
+    switch_entity:
+      name: Switch
+      description: binary_sensor that changes state when the wall switch is pressed
+      selector:
+        entity:
+          domain: binary_sensor
+    light_entity:
+      name: Light
+      description: Light whose current state decides on/off, and that gets turned off
+      selector:
+        entity:
+          domain: light
+    turn_on_action:
+      name: Turn-on action
+      description: Action(s) to run when the light should turn on (e.g. activate a scene, or light.turn_on)
+      default: []
+      selector:
+        action: {}
+
+triggers:
+  - trigger: state
+    entity_id: !input switch_entity
+    from: "on"
+    to: "off"
+  - trigger: state
+    entity_id: !input switch_entity
+    from: "off"
+    to: "on"
+
+conditions: []
+
+actions:
+  - if:
+      - condition: state
+        entity_id: !input light_entity
+        state: "off"
+    then: !input turn_on_action
+    else:
+      - action: light.turn_off
+        target:
+          entity_id: !input light_entity
+
+mode: single
