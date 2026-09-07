@@ -1,0 +1,307 @@
+blueprint:
+  name: Visitor Parking – register on arrival
+  description: >
+    Sends an actionable notification to register a visitor's car for paid
+    parking via the Parkeren Nijmegen integration.
+
+    Triggers when a known visitor's device connects to the network (device
+    tracker → home), and also polls every 5 minutes so a notification is sent
+    when the paid window approaches (configurable lead time) while a visitor is
+    already present. Skips the notification if the visitor's car is already
+    registered.
+
+    License plates are specified directly as a parameter in the format
+    "PLATE" or "PLATE=Display name", e.g. "AB12CD=Grandma Kia".
+
+    Fixed settings (edit the automation after import to change):
+      - Lead time before paid window: 30 minutes
+      - Earliest hour for notifications: 07:00
+      - End-of-window buffer: configurable (default 15 minutes before window closes)
+      - Notification wait timeout: 30 minutes
+
+  domain: automation
+  source_url: https://github.com/thomwiggers/ha-blueprints/blob/main/blueprints/automation/thomwiggers/visitor_parking.yaml
+
+  input:
+    parking_device:
+      name: Parking device
+      description: The Parkeren Nijmegen device to use.
+      selector:
+        device:
+          integration: parkeren_nijmegen
+
+    availability_sensor:
+      name: Zone availability sensor
+      description: >
+        The "Parkeertijdvak" sensor of the Parkeren Nijmegen integration.
+        Its `is_chargeable_now` attribute indicates whether the zone is
+        currently in a paid period.
+      selector:
+        entity:
+          domain: sensor
+          integration: parkeren_nijmegen
+
+    start_sensor:
+      name: Paid window start sensor
+      description: >
+        Timestamp sensor for the start of the current or next paid parking
+        window.
+      selector:
+        entity:
+          domain: sensor
+          device_class: timestamp
+          integration: parkeren_nijmegen
+
+    end_sensor:
+      name: Paid window end sensor
+      description: >
+        Timestamp sensor for the end of the current or next paid parking
+        window.
+      selector:
+        entity:
+          domain: sensor
+          device_class: timestamp
+          integration: parkeren_nijmegen
+
+    notify_services:
+      name: Notification services
+      description: >
+        One or more notification services to send parking alerts to.
+        Enter the full service name, e.g. notify.mobile_app_your_phone or
+        notify.pushover_thom
+      selector:
+        text:
+          multiple: true
+
+    visitor_trackers:
+      name: Visitor device trackers
+      description: >
+        Device trackers of your visitors (e.g. via UniFi or GPS companion
+        app). A notification is sent as soon as one of these appears at home.
+      selector:
+        entity:
+          domain: device_tracker
+          multiple: true
+
+    end_buffer_minutes:
+      name: End-of-window buffer
+      description: >
+        The reservation will end this many minutes before the paid window
+        closes, to avoid accidentally running over.
+      default: 15
+      selector:
+        number:
+          min: 0
+          max: 60
+          unit_of_measurement: min
+
+    license_plates:
+      name: License plates
+      description: >
+        License plates to offer as choices in the notification.
+        Format: "PLATE" or "PLATE=Display name".
+        Example: "AB12CD=Grandma Kia" or just "AB12CD".
+      selector:
+        text:
+          multiple: true
+
+mode: single
+
+trigger:
+  # Visitor device connects to the network
+  - platform: state
+    entity_id: !input visitor_trackers
+    to: home
+    for: "00:01:00"
+    id: visitor_arrived
+
+  # Poll every 5 minutes; window proximity check happens in the action
+  - platform: time_pattern
+    minutes: "/5"
+    id: window_check
+
+action:
+  # Make all inputs available as template variables
+  - variables:
+      parking_device: !input parking_device
+      license_plates: !input license_plates
+      visitor_trackers: !input visitor_trackers
+      availability_sensor: !input availability_sensor
+      start_sensor: !input start_sensor
+      end_sensor: !input end_sensor
+      end_buffer_minutes: !input end_buffer_minutes
+      notify_services: !input notify_services
+
+  # For the periodic check: only continue if the paid window is approaching
+  # (within 30 minutes) or already active, and at least one visitor is home
+  - if:
+      - condition: template
+        value_template: "{{ trigger.id == 'window_check' }}"
+    then:
+      - if:
+          - condition: template
+            value_template: >-
+              {% set start = as_datetime(states(start_sensor)) %}
+              {% set window_approaching = now() >= start - timedelta(minutes=30)
+                                         and now() < start
+                                         and start.date() == now().date() %}
+              {% set window_active = state_attr(availability_sensor, 'is_chargeable_now') | bool(false) %}
+              {% set ns = namespace(visitor_home=false) %}
+              {% for tracker in visitor_trackers %}
+                {% if states(tracker) == 'home' %}{% set ns.visitor_home = true %}{% endif %}
+              {% endfor %}
+              {{ not ((window_approaching or window_active) and ns.visitor_home) }}
+        then:
+          - stop: "Window not approaching or active, or no visitor home"
+
+  # Only run if the paid window is active or still coming today (after 07:00)
+  - condition: or
+    conditions:
+      - condition: state
+        entity_id: !input availability_sensor
+        attribute: is_chargeable_now
+        state: true
+      - condition: template
+        value_template: >-
+          {% set start = as_datetime(states(start_sensor)) %}
+          {{ now().hour >= 7 and start > now() and start.date() == now().date() }}
+
+  # Build plate list from input; format is "PLATE" or "PLATE=Name"
+  - variables:
+      end_time: >-
+        {{ (as_datetime(states(end_sensor)) - timedelta(minutes=end_buffer_minutes)).isoformat() }}
+      end_time_local: >-
+        {{ (as_datetime(states(end_sensor)) | as_local - timedelta(minutes=end_buffer_minutes)).strftime('%H:%M') }}
+      favorites: >-
+        {% set ns = namespace(favs=[]) %}
+        {% for entry in license_plates %}
+          {% set entry = entry.strip() %}
+          {% if '=' in entry %}
+            {% set parts = entry.split('=', 1) %}
+            {% set ns.favs = ns.favs + [{'license_plate': parts[0].strip(), 'name': parts[1].strip()}] %}
+          {% else %}
+            {% set ns.favs = ns.favs + [{'license_plate': entry}] %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.favs }}
+
+  # Stop if no plates configured
+  - if:
+      - condition: template
+        value_template: "{{ favorites | length == 0 }}"
+    then:
+      - repeat:
+          for_each: "{{ notify_services }}"
+          sequence:
+            - action: "{{ repeat.item }}"
+              data:
+                title: "Visitor parking"
+                message: "No license plates configured. Add plates to the automation settings."
+      - stop: "No license plates configured"
+
+  # Fetch active reservations
+  - action: parkeren_nijmegen.list_reservations
+    data:
+      device_id: "{{ parking_device }}"
+    response_variable: reservations_response
+    alias: Fetch active reservations
+
+  # Stop if a visitor's car is already registered
+  - variables:
+      visitor_plates: >-
+        {{ favorites | map(attribute='license_plate')
+                     | map('upper') | map('replace', '-', '') | map('replace', ' ', '')
+                     | list }}
+      registered_plates: >-
+        {{ reservations_response.reservations
+           | map(attribute='license_plate')
+           | map('upper') | map('replace', '-', '') | map('replace', ' ', '')
+           | list }}
+      already_registered: >-
+        {{ visitor_plates | select('in', registered_plates) | list | length > 0 }}
+
+  - if:
+      - condition: template
+        value_template: "{{ already_registered }}"
+    then:
+      - stop: "Visitor car already registered"
+
+  # Send notification with one button per plate
+  - repeat:
+      for_each: "{{ notify_services }}"
+      sequence:
+        - action: "{{ repeat.item }}"
+          data:
+            title: "Visitor parking"
+            message: "Register parking until {{ end_time_local }}. Which car?"
+            data:
+              tag: cvp_register
+              actions: >-
+                {% set ns = namespace(acts=[]) %}
+                {% for fav in favorites %}
+                  {% set label = fav.get('name') or fav.license_plate %}
+                  {% set ns.acts = ns.acts + [{'action': 'CVP_REG_' ~ loop.index0, 'title': label}] %}
+                {% endfor %}
+                {{ ns.acts }}
+    alias: Send choice notification
+
+  # Wait up to 30 minutes for a CVP response; loop past unrelated notification actions
+  - variables:
+      _wait_deadline: "{{ (now() + timedelta(minutes=30)).isoformat() }}"
+
+  - repeat:
+      sequence:
+        - wait_for_trigger:
+            - platform: event
+              event_type: mobile_app_notification_action
+          timeout: >-
+            {{ [1, ((as_datetime(_wait_deadline) - now()).total_seconds()) | int] | max }}
+          continue_on_timeout: true
+      until:
+        - condition: template
+          value_template: >-
+            {{ wait.trigger is none or
+               now() >= as_datetime(_wait_deadline) or
+               wait.trigger.event.data.get('action', '').startswith('CVP_REG_') }}
+    alias: Wait for car choice
+
+  # Register the chosen car
+  - if:
+      - condition: template
+        value_template: >-
+          {{ wait.trigger is not none and
+             wait.trigger.event.data.get('action', '').startswith('CVP_REG_') }}
+    then:
+      - variables:
+          chosen_index: >-
+            {{ wait.trigger.event.data.action | replace('CVP_REG_', '') | int }}
+          chosen_plate: "{{ favorites[chosen_index].license_plate }}"
+          chosen_name: >-
+            {{ favorites[chosen_index].get('name') or favorites[chosen_index].license_plate }}
+
+      - action: parkeren_nijmegen.start_reservation
+        data:
+          device_id: "{{ parking_device }}"
+          license_plate: "{{ chosen_plate }}"
+          start_time: >-
+            {% set window_start = as_datetime(states(start_sensor)) %}
+            {% if now() >= window_start %}
+              {{ now().isoformat() }}
+            {% else %}
+              {{ window_start.isoformat() }}
+            {% endif %}
+          end_time: "{{ end_time }}"
+        alias: Start reservation
+
+      - repeat:
+          for_each: "{{ notify_services }}"
+          sequence:
+            - action: "{{ repeat.item }}"
+              data:
+                title: "Visitor parking ✓"
+                message: "{{ chosen_name }} registered until {{ end_time_local }}."
+                data:
+                  tag: cvp_register
+        alias: Send confirmation
+    else:
+      - stop: "No valid choice made"
