@@ -18,6 +18,7 @@ blueprint:
       - Earliest hour for notifications: 07:00
       - End-of-window buffer: configurable (default 15 minutes before window closes)
       - Notification wait timeout: 30 minutes
+      - No notification once less than the end buffer remains in the paid window
 
   domain: automation
   source_url: https://github.com/thomwiggers/ha-blueprints/blob/main/blueprints/automation/thomwiggers/visitor_parking.yaml
@@ -184,6 +185,14 @@ action:
           {% endif %}
         {% endfor %}
         {{ ns.favs }}
+
+  # Stop once the reservation would end in the past: after (window end − buffer)
+  # there is nothing left worth registering, so don't notify for the tail of the window
+  - if:
+      - condition: template
+        value_template: "{{ as_datetime(end_time) <= now() }}"
+    then:
+      - stop: "Paid window (minus end buffer) already over"
 
   # Stop if no plates configured
   - if:
