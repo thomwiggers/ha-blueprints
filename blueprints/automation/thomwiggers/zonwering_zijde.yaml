@@ -314,7 +314,11 @@ actions:
               te_openen: >
                 {% set ns = namespace(items=[]) %}
                 {% for s in schermen %}
-                  {% if (state_attr(s.cover, 'current_position') | int(-1)) < 99
+                  {# int(100) so an unreadable position excludes the screen. With a -1
+                   default an unavailable cover renders -1 < 99 = true, and we would
+                   command a screen we cannot see and write "100" into its helper --
+                   the manual-override detector would then flag it wrongly. #}
+                {% if (state_attr(s.cover, 'current_position') | int(100)) < 99
                         and states(s.status_helper) != 'handmatig' %}
                     {% set ns.items = ns.items + [s] %}
                   {% endif %}
@@ -349,7 +353,11 @@ actions:
               te_openen: >
                 {% set ns = namespace(items=[]) %}
                 {% for s in schermen %}
-                  {% if (state_attr(s.cover, 'current_position') | int(-1)) < 99
+                  {# int(100) so an unreadable position excludes the screen. With a -1
+                   default an unavailable cover renders -1 < 99 = true, and we would
+                   command a screen we cannot see and write "100" into its helper --
+                   the manual-override detector would then flag it wrongly. #}
+                {% if (state_attr(s.cover, 'current_position') | int(100)) < 99
                         and states(s.status_helper) != 'handmatig' %}
                     {% set ns.items = ns.items + [s] %}
                   {% endif %}
@@ -377,7 +385,9 @@ actions:
             state: "off"
         sequence:
           - variables:
-              vent_positie: "{{ states(vent_helper) | int }}"
+              # -1 default: an unreadable helper skips the vent action via the
+              # guard below, instead of raising here and killing the close side too.
+              vent_positie: "{{ states(vent_helper) | int(-1) }}"
               te_ventileren: >
                 {% set ns = namespace(items=[]) %}
                 {% for s in schermen %}
@@ -402,7 +412,7 @@ actions:
                 entity_id: !input temp_sensor
                 below: !input temp_drempel
               - condition: template
-                value_template: "{{ te_ventileren | count > 0 }}"
+                value_template: "{{ te_ventileren | count > 0 and vent_positie | int(-1) >= 0 }}"
             then:
               - action: cover.set_cover_position
                 target:
