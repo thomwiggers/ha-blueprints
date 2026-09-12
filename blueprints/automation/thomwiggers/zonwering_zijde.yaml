@@ -1,0 +1,492 @@
+blueprint:
+  name: Sun screen day cycle (one side of the house)
+  description: >
+    Full daily cycle for a group of exterior sun screens that share a facade
+    (e.g. all east-facing screens): reopen them when the light drops, vent or
+    close them when the sun gets bright, escalate vented screens to fully
+    closed when it gets hot, and reset everything at sunset.
+
+
+    Instantiate this blueprint once per side of the house. Each instance takes
+    its own list of screens and its own light thresholds, so tuning a facade is
+    a matter of editing one set of form fields.
+
+
+    ## Screens
+
+
+    Each screen contributes three entities. The **status** cover is read for
+    `current_position`; the **command** cover is the entity actually driven.
+    On Somfy IO screens these differ - the command entity is the `_low_speed`
+    variant, so all motion runs at low speed while state is evaluated on the
+    main entity. If your covers have no such split, put the same entity in both
+    fields.
+
+
+    The **status helper** is an `input_text` holding the position this
+    automation last commanded ("0", the ventilation position, or "100"). A
+    companion automation compares that expectation against the real position
+    and writes "handmatig" when a human moved the screen; every branch here
+    then leaves that screen alone until the sunset reset. Screens whose helper
+    reads "handmatig" are skipped, not overridden.
+
+
+    ## Light thresholds
+
+
+    Reopening is driven by a *sliding window* sensor rather than a raw lux
+    reading: feed it a statistics helper giving the maximum over the last hour
+    (chained off a min/max helper across the side's luminance sensors). "Max
+    over the past hour is below X" means "continuously below X for an hour",
+    but unlike a `for:` duration it survives a restart, because the statistics
+    sensor reloads its buffer from the recorder.
+
+
+    Closing is driven by the raw luminance sensors directly, with a `for:`
+    duration. Any one sensor crossing the threshold makes the whole side act.
+
+
+    ## Polarity
+
+
+    The screens are assumed to have normal polarity: position 100 = rolled up,
+    0 = fully deployed. Awnings usually have the opposite polarity, so they
+    cannot be mixed into the screen list; the sunset reset accepts them
+    separately via "Extra covers to retract at sunset".
+  domain: automation
+  source_url: https://github.com/thomwiggers/ha-blueprints/blob/main/blueprints/automation/thomwiggers/zonwering_zijde.yaml
+  input:
+    screens_section:
+      name: Screens
+      icon: mdi:blinds-horizontal
+      input:
+        schermen:
+          name: Screens on this side
+          description: >
+            One entry per screen. Status cover is read, command cover is
+            driven, status helper tracks the last commanded position.
+          selector:
+            object:
+              multiple: true
+              label_field: naam
+              fields:
+                naam:
+                  label: Name
+                  required: true
+                  selector:
+                    text:
+                cover:
+                  label: Cover (status, read)
+                  required: true
+                  selector:
+                    entity:
+                      filter:
+                        domain: cover
+                cover_commando:
+                  label: Cover (command, driven)
+                  required: true
+                  selector:
+                    entity:
+                      filter:
+                        domain: cover
+                status_helper:
+                  label: Status helper (input_text)
+                  required: true
+                  selector:
+                    entity:
+                      filter:
+                        domain: input_text
+
+    licht_section:
+      name: Light thresholds
+      icon: mdi:brightness-6
+      input:
+        lux_venster_sensor:
+          name: Sliding 1 h maximum sensor
+          description: >
+            Statistics helper giving the maximum luminance over the last hour
+            for this side. Drives the reopen branches.
+          selector:
+            entity:
+              filter:
+                domain: sensor
+        open_drempel:
+          name: Reopen below
+          description: Reopen the screens once the 1 h maximum drops below this.
+          default: 10000
+          selector:
+            number:
+              min: 0
+              max: 100000
+              step: 100
+              unit_of_measurement: lx
+              mode: box
+        lux_sensoren:
+          name: Raw luminance sensors
+          description: >
+            The per-screen luminance sensors on this side. Any one of them
+            crossing the close threshold makes the whole side act.
+          selector:
+            entity:
+              multiple: true
+              filter:
+                domain: sensor
+        sluit_drempel:
+          name: Vent/close above
+          default: 15000
+          selector:
+            number:
+              min: 0
+              max: 100000
+              step: 100
+              unit_of_measurement: lx
+              mode: box
+        sluit_duur:
+          name: ...for at least
+          description: How long a raw sensor must stay above the threshold.
+          default:
+            hours: 0
+            minutes: 20
+            seconds: 0
+          selector:
+            duration:
+
+    zonnepiek_section:
+      name: Second reopen branch (after solar noon)
+      icon: mdi:sun-clock
+      description: >
+        For a facade that falls into shade once the sun passes its highest
+        point - typically the east side. Reopens on a looser threshold than the
+        main branch, but only after solar noon. Leave disabled for the other
+        side of the house.
+      collapsed: true
+      input:
+        tweede_open_tak_aan:
+          name: Enable this branch
+          default: false
+          selector:
+            boolean:
+        tweede_open_drempel:
+          name: Reopen below (after solar noon)
+          description: Should be looser (higher) than the main reopen threshold.
+          default: 15000
+          selector:
+            number:
+              min: 0
+              max: 100000
+              step: 100
+              unit_of_measurement: lx
+              mode: box
+        zonnepiek_offset:
+          name: Safety-net delay after solar noon
+          description: >
+            The sliding window may already have completed before solar noon, in
+            which case its trigger fired too early and the "sun has passed its
+            peak" condition rejected it - with no further trigger coming. This
+            timer re-checks the window that long after solar noon.
+          default:
+            hours: 1
+            minutes: 0
+            seconds: 0
+          selector:
+            duration:
+
+    klimaat_section:
+      name: Temperature, rain and ventilation
+      icon: mdi:thermometer
+      input:
+        temp_sensor:
+          name: Current temperature
+          description: >
+            The live outdoor temperature, not a forecast maximum - it decides
+            vent versus fully close at the moment the screens act.
+          selector:
+            entity:
+              filter:
+                domain: sensor
+                device_class: temperature
+        temp_drempel:
+          name: Close fully at or above
+          description: Below this the screens only vent; at or above it they close fully.
+          default: 24
+          selector:
+            number:
+              min: 0
+              max: 45
+              step: 0.5
+              unit_of_measurement: "°C"
+              mode: box
+        regen_sensor:
+          name: Rain expected
+          description: >
+            While this is on, no screen is deployed or vented - a screen left
+            out in the rain is the failure mode this guards against.
+          selector:
+            entity:
+              filter:
+                domain: binary_sensor
+        ventilatiestand_helper:
+          name: Ventilation position helper
+          description: >
+            input_number holding the partial-shade position (%) used when it is
+            bright but not yet hot. A helper rather than a fixed number so the
+            position can be retuned without editing the automation.
+          selector:
+            entity:
+              filter:
+                domain: input_number
+
+    zonsondergang_section:
+      name: Sunset reset
+      icon: mdi:weather-sunset-down
+      input:
+        zonsondergang_extra_covers:
+          name: Extra covers to retract at sunset
+          description: >
+            Inverted-polarity covers (awnings) that should be retracted with
+            close_cover at sunset. They take no part in any other branch.
+            Attach them to exactly one instance of this blueprint.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                domain: cover
+
+variables:
+  schermen: !input schermen
+  vent_helper: !input ventilatiestand_helper
+  temp_entiteit: !input temp_sensor
+  temp_grens: !input temp_drempel
+  zonsondergang_extra: !input zonsondergang_extra_covers
+
+triggers:
+  - trigger: numeric_state
+    entity_id: !input lux_venster_sensor
+    below: !input open_drempel
+    id: laag_licht
+    alias: Sliding 1 h maximum dropped below the reopen threshold
+
+  - trigger: numeric_state
+    entity_id: !input lux_venster_sensor
+    below: !input tweede_open_drempel
+    id: laag_licht_na_zonnepiek
+    enabled: !input tweede_open_tak_aan
+    alias: Sliding 1 h maximum below the looser after-solar-noon threshold
+
+  - trigger: sun.solar_noon
+    id: laag_licht_na_zonnepiek
+    enabled: !input tweede_open_tak_aan
+    options:
+      offset: !input zonnepiek_offset
+      offset_type: after
+    alias: Safety net after solar noon (catches a window that completed too early)
+
+  - trigger: numeric_state
+    entity_id: !input lux_sensoren
+    above: !input sluit_drempel
+    for: !input sluit_duur
+    id: hoog_licht
+    alias: A raw luminance sensor stayed above the close threshold
+
+  - trigger: numeric_state
+    entity_id: !input temp_sensor
+    above: !input temp_drempel
+    id: temp_boven_drempel
+    alias: Current temperature rose past the close threshold
+
+  - trigger: sun
+    event: sunset
+    id: zonsondergang
+    alias: Sunset
+
+conditions: []
+
+actions:
+  - choose:
+      # ---------------------------------------------------------------- reopen
+      - alias: Reopen - light dropped below the main threshold
+        conditions:
+          - condition: trigger
+            id: laag_licht
+        sequence:
+          - variables:
+              te_openen: >
+                {% set ns = namespace(items=[]) %}
+                {% for s in schermen %}
+                  {% if (state_attr(s.cover, 'current_position') | int(-1)) < 99
+                        and states(s.status_helper) != 'handmatig' %}
+                    {% set ns.items = ns.items + [s] %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.items }}
+          - alias: Open every screen that is still out and not manually moved
+            if: "{{ te_openen | count > 0 }}"
+            then:
+              - action: cover.open_cover
+                target:
+                  entity_id: "{{ te_openen | map(attribute='cover_commando') | list }}"
+              - action: input_text.set_value
+                target:
+                  entity_id: "{{ te_openen | map(attribute='status_helper') | list }}"
+                data:
+                  value: "100"
+
+      # ------------------------------------------- reopen, looser, after noon
+      - alias: Reopen - looser threshold now that the sun has passed its peak
+        conditions:
+          - condition: trigger
+            id: laag_licht_na_zonnepiek
+          - condition: state
+            entity_id: sun.sun
+            attribute: rising
+            state: false
+          - condition: numeric_state
+            entity_id: !input lux_venster_sensor
+            below: !input tweede_open_drempel
+        sequence:
+          - variables:
+              te_openen: >
+                {% set ns = namespace(items=[]) %}
+                {% for s in schermen %}
+                  {% if (state_attr(s.cover, 'current_position') | int(-1)) < 99
+                        and states(s.status_helper) != 'handmatig' %}
+                    {% set ns.items = ns.items + [s] %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.items }}
+          - alias: Open every screen that is still out and not manually moved
+            if: "{{ te_openen | count > 0 }}"
+            then:
+              - action: cover.open_cover
+                target:
+                  entity_id: "{{ te_openen | map(attribute='cover_commando') | list }}"
+              - action: input_text.set_value
+                target:
+                  entity_id: "{{ te_openen | map(attribute='status_helper') | list }}"
+                data:
+                  value: "100"
+
+      # ------------------------------------------------------- vent or close
+      - alias: Bright sun - vent below the temperature threshold, close at or above it
+        conditions:
+          - condition: trigger
+            id: hoog_licht
+          - condition: state
+            entity_id: !input regen_sensor
+            state: "off"
+        sequence:
+          - variables:
+              vent_positie: "{{ states(vent_helper) | int }}"
+              te_ventileren: >
+                {% set ns = namespace(items=[]) %}
+                {% for s in schermen %}
+                  {% if (state_attr(s.cover, 'current_position') | int(-1)) > 99
+                        and states(s.status_helper) != 'handmatig' %}
+                    {% set ns.items = ns.items + [s] %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.items }}
+              te_sluiten: >
+                {% set ns = namespace(items=[]) %}
+                {% for s in schermen %}
+                  {% if states(s.status_helper) != 'handmatig' %}
+                    {% set ns.items = ns.items + [s] %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.items }}
+
+          - alias: Not hot yet - move fully open screens to the ventilation position
+            if:
+              - condition: numeric_state
+                entity_id: !input temp_sensor
+                below: !input temp_drempel
+              - condition: template
+                value_template: "{{ te_ventileren | count > 0 }}"
+            then:
+              - action: cover.set_cover_position
+                target:
+                  entity_id: "{{ te_ventileren | map(attribute='cover_commando') | list }}"
+                data:
+                  position: "{{ vent_positie }}"
+              - action: input_text.set_value
+                target:
+                  entity_id: "{{ te_ventileren | map(attribute='status_helper') | list }}"
+                data:
+                  value: "{{ vent_positie }}"
+
+          # An unavailable temperature sensor must do nothing, not fall through
+          # to "close" - hence a >= template rather than the else of the above.
+          - alias: Hot - close every screen that has not been moved by hand
+            if:
+              - condition: template
+                value_template: "{{ states(temp_entiteit) | float(-999) >= (temp_grens | float) }}"
+              - condition: template
+                value_template: "{{ te_sluiten | count > 0 }}"
+            then:
+              - action: cover.close_cover
+                target:
+                  entity_id: "{{ te_sluiten | map(attribute='cover_commando') | list }}"
+              - action: input_text.set_value
+                target:
+                  entity_id: "{{ te_sluiten | map(attribute='status_helper') | list }}"
+                data:
+                  value: "0"
+
+      # ------------------------------- escalate vented screens to fully closed
+      - alias: Got hot - escalate screens sitting at the ventilation position to fully closed
+        conditions:
+          - condition: trigger
+            id: temp_boven_drempel
+          - condition: state
+            entity_id: !input regen_sensor
+            state: "off"
+        sequence:
+          - variables:
+              te_sluiten: >
+                {% set ns = namespace(items=[]) %}
+                {% for s in schermen %}
+                  {% if states(s.status_helper) | int(-1) == states(vent_helper) | int(-2) %}
+                    {% set ns.items = ns.items + [s] %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.items }}
+          - alias: Close the screens that this automation had put at the ventilation position
+            if: "{{ te_sluiten | count > 0 }}"
+            then:
+              - action: cover.close_cover
+                target:
+                  entity_id: "{{ te_sluiten | map(attribute='cover_commando') | list }}"
+              - action: input_text.set_value
+                target:
+                  entity_id: "{{ te_sluiten | map(attribute='status_helper') | list }}"
+                data:
+                  value: "0"
+
+      # --------------------------------------------------------- sunset reset
+      - alias: Sunset - open everything and hand control back to the automation
+        conditions:
+          - condition: trigger
+            id: zonsondergang
+        sequence:
+          - alias: All screens back open
+            if: "{{ schermen | count > 0 }}"
+            then:
+              - action: cover.open_cover
+                target:
+                  entity_id: "{{ schermen | map(attribute='cover_commando') | list }}"
+              # Reset regardless of "handmatig": a manual override lasts one day.
+              - action: input_text.set_value
+                target:
+                  entity_id: "{{ schermen | map(attribute='status_helper') | list }}"
+                data:
+                  value: "100"
+          - alias: Retract the inverted-polarity covers, if any
+            if: "{{ zonsondergang_extra | count > 0 }}"
+            then:
+              - action: cover.close_cover
+                target:
+                  entity_id: "{{ zonsondergang_extra }}"
+
+mode: single
+max_exceeded: silent
