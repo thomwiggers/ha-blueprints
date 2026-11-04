@@ -216,6 +216,30 @@ blueprint:
               step: 0.5
               unit_of_measurement: "°C"
               mode: box
+        verwachting_max_sensor:
+          name: Forecast maximum temperature today
+          description: >
+            Today's forecast maximum. The screens are only vented or closed
+            when this is above the minimum below; reopening and the sunset
+            reset always run.
+          selector:
+            entity:
+              filter:
+                domain: sensor
+                device_class: temperature
+        verwachting_min_drempel:
+          name: Only shade when the forecast maximum is above
+          description: >
+            On cooler days the screens stay up, so the sun can warm the house.
+            An unavailable forecast also keeps them up.
+          default: 15
+          selector:
+            number:
+              min: -10
+              max: 45
+              step: 0.5
+              unit_of_measurement: "°C"
+              mode: box
         regen_sensor:
           name: Rain expected
           description: >
@@ -383,6 +407,9 @@ actions:
           - condition: state
             entity_id: !input regen_sensor
             state: "off"
+          - condition: numeric_state
+            entity_id: !input verwachting_max_sensor
+            above: !input verwachting_min_drempel
         sequence:
           - variables:
               # -1 default: an unreadable helper skips the vent action via the
@@ -451,6 +478,9 @@ actions:
           - condition: state
             entity_id: !input regen_sensor
             state: "off"
+          - condition: numeric_state
+            entity_id: !input verwachting_max_sensor
+            above: !input verwachting_min_drempel
         sequence:
           - variables:
               te_sluiten: >
