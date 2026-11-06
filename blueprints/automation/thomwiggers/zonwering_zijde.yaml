@@ -15,12 +15,10 @@ blueprint:
     ## Screens
 
 
-    Each screen contributes three entities. The **status** cover is read for
-    `current_position`; the **command** cover is the entity actually driven.
-    On Somfy IO screens these differ - the command entity is the `_low_speed`
-    variant, so all motion runs at low speed while state is evaluated on the
-    main entity. If your covers have no such split, put the same entity in both
-    fields.
+    Each screen contributes a cover and a status helper. Every open, close and
+    set-position call on the covers passes the configured motor speed (e.g.
+    `slow` on Somfy IO screens). Choose "Device default" for covers that do
+    not support a speed.
 
 
     The **status helper** is an `input_text` holding the position this
@@ -54,6 +52,8 @@ blueprint:
     cannot be mixed into the screen list; the sunset reset accepts them
     separately via "Extra covers to retract at sunset".
   domain: automation
+  homeassistant:
+    min_version: "2026.11.0"
   source_url: https://github.com/thomwiggers/ha-blueprints/blob/main/blueprints/automation/thomwiggers/zonwering_zijde.yaml
   input:
     screens_section:
@@ -63,8 +63,8 @@ blueprint:
         schermen:
           name: Screens on this side
           description: >
-            One entry per screen. Status cover is read, command cover is
-            driven, status helper tracks the last commanded position.
+            One entry per screen. The status helper tracks the last commanded
+            position.
           selector:
             object:
               multiple: true
@@ -76,14 +76,7 @@ blueprint:
                   selector:
                     text:
                 cover:
-                  label: Cover (status, read)
-                  required: true
-                  selector:
-                    entity:
-                      filter:
-                        domain: cover
-                cover_commando:
-                  label: Cover (command, driven)
+                  label: Cover
                   required: true
                   selector:
                     entity:
@@ -96,6 +89,21 @@ blueprint:
                     entity:
                       filter:
                         domain: input_text
+        snelheid:
+          name: Motor speed
+          description: >
+            Speed passed to every open, close and set-position call.
+            "Device default" sends no speed, for covers without speed support.
+          default: default
+          selector:
+            select:
+              options:
+                - label: Device default
+                  value: default
+                - label: Slow
+                  value: slow
+                - label: Fast
+                  value: fast
 
     licht_section:
       name: Light thresholds
@@ -283,6 +291,8 @@ variables:
   temp_entiteit: !input temp_sensor
   temp_grens: !input temp_drempel
   zonsondergang_extra: !input zonsondergang_extra_covers
+  snelheid: !input snelheid
+  speed_data: "{{ {} if snelheid == 'default' else {'speed': snelheid} }}"
 
 triggers:
   - trigger: numeric_state
@@ -353,7 +363,8 @@ actions:
             then:
               - action: cover.open_cover
                 target:
-                  entity_id: "{{ te_openen | map(attribute='cover_commando') | list }}"
+                  entity_id: "{{ te_openen | map(attribute='cover') | list }}"
+                data: "{{ speed_data }}"
               - action: input_text.set_value
                 target:
                   entity_id: "{{ te_openen | map(attribute='status_helper') | list }}"
@@ -392,7 +403,8 @@ actions:
             then:
               - action: cover.open_cover
                 target:
-                  entity_id: "{{ te_openen | map(attribute='cover_commando') | list }}"
+                  entity_id: "{{ te_openen | map(attribute='cover') | list }}"
+                data: "{{ speed_data }}"
               - action: input_text.set_value
                 target:
                   entity_id: "{{ te_openen | map(attribute='status_helper') | list }}"
@@ -443,9 +455,8 @@ actions:
             then:
               - action: cover.set_cover_position
                 target:
-                  entity_id: "{{ te_ventileren | map(attribute='cover_commando') | list }}"
-                data:
-                  position: "{{ vent_positie }}"
+                  entity_id: "{{ te_ventileren | map(attribute='cover') | list }}"
+                data: "{{ dict(speed_data, position=vent_positie | int) }}"
               - action: input_text.set_value
                 target:
                   entity_id: "{{ te_ventileren | map(attribute='status_helper') | list }}"
@@ -463,7 +474,8 @@ actions:
             then:
               - action: cover.close_cover
                 target:
-                  entity_id: "{{ te_sluiten | map(attribute='cover_commando') | list }}"
+                  entity_id: "{{ te_sluiten | map(attribute='cover') | list }}"
+                data: "{{ speed_data }}"
               - action: input_text.set_value
                 target:
                   entity_id: "{{ te_sluiten | map(attribute='status_helper') | list }}"
@@ -496,7 +508,8 @@ actions:
             then:
               - action: cover.close_cover
                 target:
-                  entity_id: "{{ te_sluiten | map(attribute='cover_commando') | list }}"
+                  entity_id: "{{ te_sluiten | map(attribute='cover') | list }}"
+                data: "{{ speed_data }}"
               - action: input_text.set_value
                 target:
                   entity_id: "{{ te_sluiten | map(attribute='status_helper') | list }}"
@@ -514,7 +527,8 @@ actions:
             then:
               - action: cover.open_cover
                 target:
-                  entity_id: "{{ schermen | map(attribute='cover_commando') | list }}"
+                  entity_id: "{{ schermen | map(attribute='cover') | list }}"
+                data: "{{ speed_data }}"
               # Reset regardless of "handmatig": a manual override lasts one day.
               - action: input_text.set_value
                 target:
